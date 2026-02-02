@@ -11,16 +11,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build with Buildozer Docker
-        # This uses the OFFICIAL container from Kivy.
-        # It contains all the missing libraries (libtinfo5) inside it.
+      - name: Build with Buildozer
         uses: docker://kivy/buildozer:latest
         with:
-          # The command to run inside the container
-          args: buildozer android debug
+          # FIX: We override the entrypoint to bash so we can pipe "yes"
+          entrypoint: /bin/bash
+          # FIX: "yes |" forces the answer "y" when Buildozer asks about root
+          args: -c "yes | buildozer android debug"
         env:
-          # These fixes ensure the container can write to the GitHub folder
-          # without "Permission Denied" errors.
+          # These fixes help with file permissions
           USER_ID: 1001
           GROUP_ID: 1001
 
@@ -28,4 +27,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: package
+          # The file might be in bin/ or .buildozer/android/platform/build-xyz/dists/
+          # This pattern finds it wherever it lands.
           path: bin/*.apk

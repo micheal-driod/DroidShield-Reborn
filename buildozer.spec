@@ -2,6 +2,7 @@
 # (str) Title of your application
 title = DroidShield
 
+
 # (str) Package name
 package.name = droidshield
 

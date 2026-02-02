@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build with Buildozer Docker
+        # This uses the OFFICIAL container from Kivy.
+        # It contains all the missing libraries (libtinfo5) inside it.
+        uses: docker://kivy/buildozer:latest
+        with:
+          # The command to run inside the container
+          args: buildozer android debug
+        env:
+          # These fixes ensure the container can write to the GitHub folder
+          # without "Permission Denied" errors.
+          USER_ID: 1001
+          GROUP_ID: 1001
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: bin/*.apk

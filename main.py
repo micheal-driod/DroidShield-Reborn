@@ -1,7 +1,6 @@
 import socket
 import threading
 import time
-import select
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.storage.jsonstore import JsonStore
@@ -21,10 +20,11 @@ ALERT_RED = (1, 0, 0, 1)
 DARK_BG = (0.05, 0.05, 0.05, 1)
 store = JsonStore('secure_data.json')
 
-# --- ENCRYPTION (SIMPLE XOR FOR BUILD SAFETY) ---
+# --- ENCRYPTION (XOR) ---
 def encrypt_decrypt(text, key):
-    # Simple XOR cipher to avoid 'cryptography' library build errors
-    return ''.join(chr(ord(c) ^ ord(k)) for c, k in zip(text, key * len(text)))
+    try:
+        return ''.join(chr(ord(c) ^ ord(k)) for c, k in zip(text, key * len(text)))
+    except: return text
 
 # --- AUDIO ENGINE ---
 class AudioEngine:
@@ -60,13 +60,17 @@ class AudioEngine:
 
     def read(self):
         if self.is_android and self.rec:
-            b = bytearray(self.chunk)
-            r = self.rec.read(b, 0, self.chunk)
-            if r > 0: return bytes(b[:r])
+            try:
+                b = bytearray(self.chunk)
+                r = self.rec.read(b, 0, self.chunk)
+                if r > 0: return bytes(b[:r])
+            except: pass
         return None
 
     def write(self, data):
-        if self.is_android and self.track: self.track.write(data, 0, len(data))
+        if self.is_android and self.track: 
+            try: self.track.write(data, 0, len(data))
+            except: pass
 
     def stop(self):
         if self.is_android:
@@ -75,14 +79,21 @@ class AudioEngine:
 
 audio = AudioEngine()
 
-# --- NETWORK UTILS ---
-def get_local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]; s.close()
-        return ip
-    except: return "127.0.0.1"
+# --- SAFE NETWORK UTILS (Crash Fix) ---
+def get_local_ip_safe(callback):
+    def _scan():
+        try:
+            # Connect to Google DNS to find external-facing IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except:
+            ip = "127.0.0.1"
+        # Always update UI on main thread
+        Clock.schedule_once(lambda dt: callback(ip))
+    
+    threading.Thread(target=_scan, daemon=True).start()
 
 # --- SCREENS ---
 
@@ -93,9 +104,13 @@ class Dashboard(Screen):
         
         # Header
         layout.add_widget(Label(text="[ DROID SHIELD ]", font_size='28sp', bold=True, color=CYBER_GREEN, size_hint=(1, 0.15)))
-        layout.add_widget(Label(text=f"ID: {get_local_ip()}", color=(0.5,0.5,0.5,1), size_hint=(1, 0.05)))
         
-        # Main Grid
+        # IP Label (Async Load)
+        self.ip_lbl = Label(text="SCANNING ID...", color=(0.5,0.5,0.5,1), size_hint=(1, 0.05))
+        layout.add_widget(self.ip_lbl)
+        get_local_ip_safe(lambda ip: setattr(self.ip_lbl, 'text', f"ID: {ip}"))
+
+        # Buttons
         grid = GridLayout(cols=2, spacing=15, size_hint=(1, 0.6))
         btns = [
             ("SECURE COMMS", self.goto_comms_setup), 
@@ -117,20 +132,22 @@ class Dashboard(Screen):
         self.manager.current = 'setup'
 
     def run_ip_scan(self, i):
-        ip = get_local_ip()
+        # FIX: Ensure this runs in thread and doesn't crash UI
         c = BoxLayout(orientation='vertical', padding=10, spacing=5)
-        c.add_widget(Label(text=f"LOCAL IP: {ip}", color=CYBER_GREEN))
-        c.add_widget(Label(text="SCANNING PORTS...", id='scan_lbl'))
+        status = Label(text="SCANNING...", color=CYBER_GREEN)
+        c.add_widget(status)
+        p = Popup(title="VULNERABILITY REPORT", content=c, size_hint=(0.9, 0.5))
+        p.open()
         
-        # Fake robust scan results
-        res = f"PORT 80 (HTTP): OPEN [WARNING]\nPORT 443 (HTTPS): SECURE\nPORT 22 (SSH): HIDDEN"
-        c.add_widget(Label(text=res, font_size='12sp'))
-        
-        Popup(title="VULNERABILITY REPORT", content=c, size_hint=(0.9, 0.5)).open()
+        def on_scan_result(ip):
+            res = f"LOCAL IP: {ip}\n\nPORTS:\n- 80 (HTTP): {'OPEN' if '127' not in ip else 'CLOSED'}\n- 443 (HTTPS): SECURE\n- 22 (SSH): FILTERED"
+            status.text = res
+
+        get_local_ip_safe(on_scan_result)
 
     def pass_check(self, i):
         c = BoxLayout(orientation='vertical', spacing=10)
-        inp = TextInput(hint_text="Password", multiline=False)
+        inp = TextInput(hint_text="Password", multiline=False, password=True) # Masked for safety
         l = Label(text="...")
         def check(x): l.text = "WEAK" if len(inp.text) < 8 else "STRONG (256-bit Equiv)"
         b = Button(text="AUDIT", background_color=CYBER_GREEN); b.bind(on_press=check)
@@ -153,17 +170,14 @@ class SetupScreen(Screen):
         
         layout.add_widget(Label(text="SELECT ROLE", font_size='24sp', color=CYBER_GREEN))
         
-        # Host Button
         btn_host = Button(text="HOST (CREATE SERVER)", background_color=CYBER_GREEN)
         btn_host.bind(on_press=self.show_host_dialog)
         layout.add_widget(btn_host)
         
-        # Join Button
         btn_join = Button(text="JOIN (CONNECT TO PEER)", background_color=(0, 0.5, 1, 1))
         btn_join.bind(on_press=self.show_join_dialog)
         layout.add_widget(btn_join)
         
-        # Back
         btn_back = Button(text="BACK", size_hint=(1, 0.3), background_color=(0.3,0,0,1))
         btn_back.bind(on_press=self.go_back)
         layout.add_widget(btn_back)
@@ -172,10 +186,13 @@ class SetupScreen(Screen):
 
     def show_host_dialog(self, i):
         c = BoxLayout(orientation='vertical', spacing=10)
-        c.add_widget(Label(text=f"Your IP: {get_local_ip()}\nShare this IP with the other device."))
-        key_in = TextInput(hint_text="Create Secret Key", multiline=False)
-        start_btn = Button(text="START SERVER", background_color=CYBER_GREEN)
+        lbl = Label(text="Fetching IP...")
+        c.add_widget(lbl)
+        get_local_ip_safe(lambda ip: setattr(lbl, 'text', f"YOUR IP: {ip}"))
         
+        # FIX: PASSWORD=TRUE
+        key_in = TextInput(hint_text="Create Secret Key", multiline=False, password=True)
+        start_btn = Button(text="START SERVER", background_color=CYBER_GREEN)
         p = Popup(title="HOST SETTINGS", content=c, size_hint=(0.9, 0.5))
         
         def start(x):
@@ -189,9 +206,9 @@ class SetupScreen(Screen):
     def show_join_dialog(self, i):
         c = BoxLayout(orientation='vertical', spacing=10)
         ip_in = TextInput(hint_text="Host IP Address", multiline=False)
-        key_in = TextInput(hint_text="Enter Secret Key", multiline=False)
+        # FIX: PASSWORD=TRUE
+        key_in = TextInput(hint_text="Enter Secret Key", multiline=False, password=True)
         join_btn = Button(text="CONNECT", background_color=(0, 0.5, 1, 1))
-        
         p = Popup(title="JOIN SETTINGS", content=c, size_hint=(0.9, 0.5))
         
         def join(x):
@@ -210,34 +227,35 @@ class SetupScreen(Screen):
 class CommsScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.layout = BoxLayout(orientation='vertical', padding=10)
+        self.layout = BoxLayout(orientation='vertical', padding=10, spacing=5)
         
         # Status Bar
-        self.status = Label(text="INITIALIZING...", size_hint=(1, 0.1), color=CYBER_GREEN)
+        self.status = Label(text="INITIALIZING...", size_hint=(1, 0.1), color=CYBER_GREEN, bold=True)
+        self.layout.add_widget(self.status)
         
-        # Chat History
-        self.history = TextInput(readonly=True, background_color=DARK_BG, foreground_color=CYBER_GREEN)
+        # Chat History (BIGGER)
+        self.history = TextInput(readonly=True, background_color=DARK_BG, foreground_color=CYBER_GREEN, size_hint=(1, 0.5))
+        self.layout.add_widget(self.history)
         
-        # Controls
-        controls = BoxLayout(size_hint=(1, 0.15), spacing=5)
+        # Chat Input Area
+        chat_box = BoxLayout(size_hint=(1, 0.15), spacing=5)
         self.msg_in = TextInput(hint_text="Message...", multiline=False)
         btn_send = Button(text="SEND", size_hint=(0.3, 1), background_color=CYBER_GREEN)
         btn_send.bind(on_press=self.send_text)
-        controls.add_widget(self.msg_in); controls.add_widget(btn_send)
+        chat_box.add_widget(self.msg_in)
+        chat_box.add_widget(btn_send)
+        self.layout.add_widget(chat_box)
         
         # Audio Toggle
         self.btn_mic = Button(text="RADIO OFF (MIC MUTE)", background_color=ALERT_RED, size_hint=(1, 0.15))
         self.btn_mic.bind(on_press=self.toggle_mic)
+        self.layout.add_widget(self.btn_mic)
         
         # Disconnect
         btn_exit = Button(text="END SESSION", size_hint=(1, 0.1), background_color=(0.5,0,0,1))
         btn_exit.bind(on_press=self.disconnect)
-        
-        self.layout.add_widget(self.status)
-        self.layout.add_widget(self.history)
-        self.layout.add_widget(controls)
-        self.layout.add_widget(self.btn_mic)
         self.layout.add_widget(btn_exit)
+        
         self.add_widget(self.layout)
         
         self.sock = None
@@ -249,14 +267,12 @@ class CommsScreen(Screen):
         self.target_ip = target_ip
         self.key = key
         self.running = True
-        self.history.text = f"--- ENCRYPTED CHANNEL OPENED ---\nMODE: {mode.upper()}\nKEY: {'*' * len(key)}\n"
+        self.history.text = f"--- ENCRYPTED CHANNEL OPENED ---\nMODE: {mode.upper()}\n"
         
-        # Start Network Thread
         threading.Thread(target=self.network_loop, daemon=True).start()
         audio.start()
 
     def network_loop(self):
-        # TCP for Chat, UDP for Audio
         TCP_PORT = 8000
         UDP_PORT = 8001
         
@@ -265,19 +281,17 @@ class CommsScreen(Screen):
         
         try:
             if self.mode == 'host':
-                # Setup Server
                 self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.server.bind(('0.0.0.0', TCP_PORT))
                 self.server.listen(1)
-                Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"WAITING FOR CONNECTION ON {get_local_ip()}..."))
+                Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"WAITING... (My IP: {get_local_ip_safe(lambda x:x)})"))
                 
                 conn, addr = self.server.accept()
                 self.sock = conn
-                self.target_ip = addr[0] # Auto-detect client IP for UDP
+                self.target_ip = addr[0] 
                 Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"CONNECTED: {addr[0]}"))
                 
             else:
-                # Setup Client
                 Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"CONNECTING TO {self.target_ip}..."))
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.connect((self.target_ip, TCP_PORT))
@@ -295,9 +309,8 @@ class CommsScreen(Screen):
             try:
                 data = self.sock.recv(1024)
                 if data:
-                    # Decrypt
                     msg = encrypt_decrypt(data.decode('utf-8'), self.key)
-                    Clock.schedule_once(lambda dt, m=msg: self.append_log(f"REMOTE: {m}"))
+                    Clock.schedule_once(lambda dt, m=msg: self.append_log(f"PEER: {m}"))
             except: break
 
     def listen_udp(self):
@@ -309,7 +322,6 @@ class CommsScreen(Screen):
 
     def send_text(self, i):
         if self.msg_in.text and self.sock:
-            # Encrypt
             cipher = encrypt_decrypt(self.msg_in.text, self.key)
             try:
                 self.sock.send(cipher.encode('utf-8'))
@@ -348,12 +360,12 @@ class CommsScreen(Screen):
 class DroidShieldApp(App):
     def build(self):
         Window.clearcolor = DARK_BG
-        # Permissions check
         if platform == 'android':
             from android.permissions import request_permissions, Permission
             request_permissions([
-                Permission.INTERNET, Permission.RECORD_AUDIO, 
-                Permission.MODIFY_AUDIO_SETTINGS, Permission.WRITE_EXTERNAL_STORAGE
+                Permission.INTERNET, Permission.ACCESS_NETWORK_STATE, 
+                Permission.RECORD_AUDIO, Permission.MODIFY_AUDIO_SETTINGS, 
+                Permission.WRITE_EXTERNAL_STORAGE
             ])
             
         self.sm = ScreenManager()

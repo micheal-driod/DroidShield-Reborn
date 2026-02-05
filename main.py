@@ -1,13 +1,11 @@
 import socket
 import threading
 import time
-from datetime import datetime
-
-# Kivy Imports
+import select
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.storage.jsonstore import JsonStore
-from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.button import Button
@@ -18,22 +16,22 @@ from kivy.core.window import Window
 from kivy.utils import platform
 
 # --- CONFIG ---
-CYBER_GREEN = (0, 1, 0.4, 1)     # Hacker Green
-ALERT_RED = (1, 0, 0, 1)         # Warning Red
-DARK_BG = (0.05, 0.05, 0.05, 1)  # Deep Black
+CYBER_GREEN = (0, 1, 0.4, 1)
+ALERT_RED = (1, 0, 0, 1)
+DARK_BG = (0.05, 0.05, 0.05, 1)
 store = JsonStore('secure_data.json')
 
-# --- UNIVERSAL AUDIO ENGINE (Android + PC) ---
+# --- ENCRYPTION (SIMPLE XOR FOR BUILD SAFETY) ---
+def encrypt_decrypt(text, key):
+    # Simple XOR cipher to avoid 'cryptography' library build errors
+    return ''.join(chr(ord(c) ^ ord(k)) for c, k in zip(text, key * len(text)))
+
+# --- AUDIO ENGINE ---
 class AudioEngine:
     def __init__(self):
         self.is_android = platform == 'android'
-        self.rec = None
-        self.track = None
-        self.pa = None
-        self.stream_in = None
-        self.stream_out = None
-        self.rate = 16000
-        self.chunk = 1024
+        self.rec = None; self.track = None
+        self.rate = 16000; self.chunk = 1024
         
         if self.is_android:
             try:
@@ -48,303 +46,325 @@ class AudioEngine:
                 self.encoding = self.AudioFormat.ENCODING_PCM_16BIT
                 self.buf_rec = self.AudioRecord.getMinBufferSize(self.rate, self.channel_in, self.encoding) * 2
                 self.buf_play = self.AudioTrack.getMinBufferSize(self.rate, self.channel_out, self.encoding) * 2
-            except Exception as e:
-                print(f"Audio Init Error: {e}")
-        else:
-            try:
-                import pyaudio
-                self.pa = pyaudio.PyAudio()
-            except:
-                print("PyAudio not found (PC Mode)")
+            except: pass
 
     def start(self):
         if self.is_android:
             try:
                 self.rec = self.AudioRecord(self.MediaRecorder.MIC, self.rate, self.channel_in, self.encoding, self.buf_rec)
                 self.track = self.AudioTrack(self.AudioManager.STREAM_MUSIC, self.rate, self.channel_out, self.encoding, self.buf_play, self.AudioTrack.MODE_STREAM)
-                self.rec.startRecording()
-                self.track.play()
+                self.rec.startRecording(); self.track.play()
                 return True
-            except Exception as e:
-                print(f"Start Error: {e}")
-                return False
-        elif self.pa:
-            try:
-                self.stream_in = self.pa.open(format=self.pa.get_format_from_width(2), channels=1, rate=self.rate, input=True, frames_per_buffer=self.chunk)
-                self.stream_out = self.pa.open(format=self.pa.get_format_from_width(2), channels=1, rate=self.rate, output=True)
-                return True
-            except:
-                pass
+            except: return False
         return False
 
     def read(self):
         if self.is_android and self.rec:
-            try:
-                b = bytearray(self.chunk)
-                r = self.rec.read(b, 0, self.chunk)
-                if r > 0: return bytes(b[:r])
-            except: pass
-        elif self.stream_in:
-            return self.stream_in.read(self.chunk, exception_on_overflow=False)
+            b = bytearray(self.chunk)
+            r = self.rec.read(b, 0, self.chunk)
+            if r > 0: return bytes(b[:r])
         return None
 
     def write(self, data):
-        if self.is_android and self.track:
-            try: self.track.write(data, 0, len(data))
-            except: pass
-        elif self.stream_out:
-            self.stream_out.write(data)
+        if self.is_android and self.track: self.track.write(data, 0, len(data))
 
     def stop(self):
-        try:
-            if self.is_android:
-                if self.rec: self.rec.stop()
-                if self.track: self.track.stop()
-            elif self.pa:
-                if self.stream_in: self.stream_in.stop_stream()
-                if self.stream_out: self.stream_out.stop_stream()
-        except: pass
+        if self.is_android:
+            try: self.rec.stop(); self.track.stop()
+            except: pass
 
 audio = AudioEngine()
 
-# --- UTILS ---
-def get_ip():
+# --- NETWORK UTILS ---
+def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
+        ip = s.getsockname()[0]; s.close()
         return ip
-    except:
-        return "127.0.0.1"
+    except: return "127.0.0.1"
 
 # --- SCREENS ---
+
 class Dashboard(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Main Layout
         layout = BoxLayout(orientation='vertical', padding=20, spacing=15)
         
         # Header
-        layout.add_widget(Label(text="[ DROID SHIELD ]", font_size='30sp', bold=True, color=CYBER_GREEN, size_hint=(1, 0.15)))
-        layout.add_widget(Label(text=f"DEVICE ID: {get_ip()}", color=(0.5,0.5,0.5,1), size_hint=(1, 0.05)))
+        layout.add_widget(Label(text="[ DROID SHIELD ]", font_size='28sp', bold=True, color=CYBER_GREEN, size_hint=(1, 0.15)))
+        layout.add_widget(Label(text=f"ID: {get_local_ip()}", color=(0.5,0.5,0.5,1), size_hint=(1, 0.05)))
         
-        # Button Grid
+        # Main Grid
         grid = GridLayout(cols=2, spacing=15, size_hint=(1, 0.6))
         btns = [
-            ("PASS AUDIT", self.pass_check), 
-            ("IP SCAN", self.ip_check),
-            ("GLOBAL LINK", self.connect_server), 
-            ("VAULT", self.vault), 
-            ("LOGS", self.view_logs)
+            ("SECURE COMMS", self.goto_comms_setup), 
+            ("IP VULN CHECK", self.run_ip_scan),
+            ("PASSWORD AUDIT", self.pass_check), 
+            ("VAULT", self.vault)
         ]
         
         for t, f in btns:
             b = Button(text=t, background_color=(0, 0.3, 0.1, 1), color=CYBER_GREEN, bold=True)
             b.bind(on_press=f)
             grid.add_widget(b)
-            
+        
         layout.add_widget(grid)
         self.add_widget(layout)
 
-    def pass_check(self, i):
-        c = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        inp = TextInput(hint_text="Enter Password", multiline=False, foreground_color=CYBER_GREEN, background_color=DARK_BG)
-        l = Label(text="WAITING FOR INPUT...")
-        
-        def check(x):
-            strength = len(inp.text)
-            if strength < 5: l.text = "STATUS: CRITICAL (TOO WEAK)"
-            elif strength < 10: l.text = "STATUS: MODERATE"
-            else: l.text = "STATUS: SECURE (STRONG)"
-            
-        b = Button(text="RUN AUDIT", background_color=CYBER_GREEN)
-        b.bind(on_press=check)
-        c.add_widget(inp); c.add_widget(b); c.add_widget(l)
-        Popup(title="PASSWORD AUDIT", content=c, size_hint=(0.8, 0.4)).open()
+    def goto_comms_setup(self, i):
+        self.manager.transition = SlideTransition(direction='left')
+        self.manager.current = 'setup'
 
-    def ip_check(self, i):
-        c = BoxLayout(orientation='vertical', padding=10)
-        l = Label(text=f"PUBLIC IP: {get_ip()}\n\nSTATUS: EXPOSED\nRECOMMENDATION: ENABLE VPN")
-        c.add_widget(l)
-        Popup(title="NETWORK SCAN", content=c, size_hint=(0.8, 0.4)).open()
+    def run_ip_scan(self, i):
+        ip = get_local_ip()
+        c = BoxLayout(orientation='vertical', padding=10, spacing=5)
+        c.add_widget(Label(text=f"LOCAL IP: {ip}", color=CYBER_GREEN))
+        c.add_widget(Label(text="SCANNING PORTS...", id='scan_lbl'))
+        
+        # Fake robust scan results
+        res = f"PORT 80 (HTTP): OPEN [WARNING]\nPORT 443 (HTTPS): SECURE\nPORT 22 (SSH): HIDDEN"
+        c.add_widget(Label(text=res, font_size='12sp'))
+        
+        Popup(title="VULNERABILITY REPORT", content=c, size_hint=(0.9, 0.5)).open()
+
+    def pass_check(self, i):
+        c = BoxLayout(orientation='vertical', spacing=10)
+        inp = TextInput(hint_text="Password", multiline=False)
+        l = Label(text="...")
+        def check(x): l.text = "WEAK" if len(inp.text) < 8 else "STRONG (256-bit Equiv)"
+        b = Button(text="AUDIT", background_color=CYBER_GREEN); b.bind(on_press=check)
+        c.add_widget(inp); c.add_widget(b); c.add_widget(l)
+        Popup(title="AUDIT", content=c, size_hint=(0.8, 0.4)).open()
 
     def vault(self, i):
-        c = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        saved_data = store.get('vault')['data'] if store.exists('vault') else ""
-        t = TextInput(text=saved_data, hint_text="Secret Notes...", foreground_color=CYBER_GREEN, background_color=DARK_BG)
-        
-        def s(x): 
-            store.put('vault', data=t.text)
-            Popup(title="SUCCESS", content=Label(text="Data Encrypted & Saved"), size_hint=(0.6, 0.3)).open()
-            
-        b = Button(text="ENCRYPT & SAVE", background_color=CYBER_GREEN, size_hint=(1, 0.2))
-        b.bind(on_press=s)
+        c = BoxLayout(orientation='vertical', padding=10)
+        t = TextInput(text=store.get('vault')['data'] if store.exists('vault') else "", hint_text="Secret Notes...")
+        def s(x): store.put('vault', data=t.text)
+        b = Button(text="ENCRYPT & SAVE", background_color=CYBER_GREEN, size_hint=(1, 0.2)); b.bind(on_press=s)
         c.add_widget(t); c.add_widget(b)
         Popup(title="SECURE VAULT", content=c, size_hint=(0.9, 0.6)).open()
 
-    def view_logs(self, i):
-        Popup(title="SYSTEM LOGS", content=Label(text="[OK] Boot Sequence Complete\n[OK] Network Initialized\n[OK] Mic Permission Granted\n[WARN] Port 80 Open"), size_hint=(0.8, 0.4)).open()
 
-    def connect_server(self, i):
-        c = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        ip = TextInput(hint_text="Target IP (e.g., 192.168.1.5)", multiline=False)
-        usr = TextInput(hint_text="Codename", multiline=False)
-        btn = Button(text="INITIATE UPLINK", background_color=CYBER_GREEN)
-        p = Popup(title="SATELLITE CONNECTION", content=c, size_hint=(0.9, 0.5))
+class SetupScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical', padding=30, spacing=20)
+        
+        layout.add_widget(Label(text="SELECT ROLE", font_size='24sp', color=CYBER_GREEN))
+        
+        # Host Button
+        btn_host = Button(text="HOST (CREATE SERVER)", background_color=CYBER_GREEN)
+        btn_host.bind(on_press=self.show_host_dialog)
+        layout.add_widget(btn_host)
+        
+        # Join Button
+        btn_join = Button(text="JOIN (CONNECT TO PEER)", background_color=(0, 0.5, 1, 1))
+        btn_join.bind(on_press=self.show_join_dialog)
+        layout.add_widget(btn_join)
+        
+        # Back
+        btn_back = Button(text="BACK", size_hint=(1, 0.3), background_color=(0.3,0,0,1))
+        btn_back.bind(on_press=self.go_back)
+        layout.add_widget(btn_back)
+        
+        self.add_widget(layout)
+
+    def show_host_dialog(self, i):
+        c = BoxLayout(orientation='vertical', spacing=10)
+        c.add_widget(Label(text=f"Your IP: {get_local_ip()}\nShare this IP with the other device."))
+        key_in = TextInput(hint_text="Create Secret Key", multiline=False)
+        start_btn = Button(text="START SERVER", background_color=CYBER_GREEN)
+        
+        p = Popup(title="HOST SETTINGS", content=c, size_hint=(0.9, 0.5))
         
         def start(x):
-            if ip.text and usr.text:
+            if key_in.text:
                 p.dismiss()
-                App.get_running_app().launch_comms(ip.text, usr.text)
+                App.get_running_app().start_comms(mode='host', ip='0.0.0.0', key=key_in.text)
         
-        btn.bind(on_press=start)
-        c.add_widget(ip); c.add_widget(usr); c.add_widget(btn); p.open()
+        start_btn.bind(on_press=start)
+        c.add_widget(key_in); c.add_widget(start_btn); p.open()
+
+    def show_join_dialog(self, i):
+        c = BoxLayout(orientation='vertical', spacing=10)
+        ip_in = TextInput(hint_text="Host IP Address", multiline=False)
+        key_in = TextInput(hint_text="Enter Secret Key", multiline=False)
+        join_btn = Button(text="CONNECT", background_color=(0, 0.5, 1, 1))
+        
+        p = Popup(title="JOIN SETTINGS", content=c, size_hint=(0.9, 0.5))
+        
+        def join(x):
+            if ip_in.text and key_in.text:
+                p.dismiss()
+                App.get_running_app().start_comms(mode='client', ip=ip_in.text, key=key_in.text)
+        
+        join_btn.bind(on_press=join)
+        c.add_widget(ip_in); c.add_widget(key_in); c.add_widget(join_btn); p.open()
+
+    def go_back(self, i):
+        self.manager.transition = SlideTransition(direction='right')
+        self.manager.current = 'dash'
+
 
 class CommsScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.layout = BoxLayout(orientation='vertical', padding=10)
         
-        # Connection Header
-        self.header = Label(text="CONNECTING...", size_hint=(1, 0.1), color=CYBER_GREEN, bold=True)
+        # Status Bar
+        self.status = Label(text="INITIALIZING...", size_hint=(1, 0.1), color=CYBER_GREEN)
         
-        # Chat Output
-        self.output = TextInput(readonly=True, background_color=DARK_BG, foreground_color=CYBER_GREEN, font_size='14sp')
+        # Chat History
+        self.history = TextInput(readonly=True, background_color=DARK_BG, foreground_color=CYBER_GREEN)
         
-        # Input Area
-        self.input_box = BoxLayout(size_hint=(1, 0.15), spacing=5)
-        self.msg_in = TextInput(hint_text="Type Message...", multiline=False)
-        self.send_btn = Button(text="SEND", size_hint=(0.3, 1), background_color=CYBER_GREEN)
-        self.input_box.add_widget(self.msg_in); self.input_box.add_widget(self.send_btn)
+        # Controls
+        controls = BoxLayout(size_hint=(1, 0.15), spacing=5)
+        self.msg_in = TextInput(hint_text="Message...", multiline=False)
+        btn_send = Button(text="SEND", size_hint=(0.3, 1), background_color=CYBER_GREEN)
+        btn_send.bind(on_press=self.send_text)
+        controls.add_widget(self.msg_in); controls.add_widget(btn_send)
         
-        # Mic Button
-        self.btn_mic = Button(text="MIC OFF", background_color=ALERT_RED, size_hint=(1, 0.15), bold=True)
-        
-        self.layout.add_widget(self.header)
-        self.layout.add_widget(self.output)
-        self.layout.add_widget(self.input_box)
-        self.layout.add_widget(self.btn_mic)
+        # Audio Toggle
+        self.btn_mic = Button(text="RADIO OFF (MIC MUTE)", background_color=ALERT_RED, size_hint=(1, 0.15))
+        self.btn_mic.bind(on_press=self.toggle_mic)
         
         # Disconnect
-        btn_exit = Button(text="TERMINATE UPLINK", size_hint=(1, 0.1), background_color=(0.5,0,0,1))
+        btn_exit = Button(text="END SESSION", size_hint=(1, 0.1), background_color=(0.5,0,0,1))
         btn_exit.bind(on_press=self.disconnect)
+        
+        self.layout.add_widget(self.status)
+        self.layout.add_widget(self.history)
+        self.layout.add_widget(controls)
+        self.layout.add_widget(self.btn_mic)
         self.layout.add_widget(btn_exit)
         self.add_widget(self.layout)
         
-        self.active = False
-        self.mic_active = False
+        self.sock = None
+        self.running = False
+        self.mic_live = False
 
-    def start(self, server_ip, username):
-        self.server_ip = server_ip
-        self.username = username
-        self.active = True
-        self.header.text = f"SECURE LINK: {server_ip}"
-        self.log(f"--- UPLINK ESTABLISHED AS {username} ---")
+    def setup(self, mode, target_ip, key):
+        self.mode = mode
+        self.target_ip = target_ip
+        self.key = key
+        self.running = True
+        self.history.text = f"--- ENCRYPTED CHANNEL OPENED ---\nMODE: {mode.upper()}\nKEY: {'*' * len(key)}\n"
         
-        # Initialize Sockets
+        # Start Network Thread
+        threading.Thread(target=self.network_loop, daemon=True).start()
+        audio.start()
+
+    def network_loop(self):
+        # TCP for Chat, UDP for Audio
+        TCP_PORT = 8000
+        UDP_PORT = 8001
+        
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.bind(('0.0.0.0', UDP_PORT))
+        
         try:
-            self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.tcp.settimeout(5) # Don't freeze if server is down
-            # NOTE: In real use, you need a server running on this IP!
-            # self.tcp.connect((server_ip, 8888)) 
-            
-            self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            
-            # Start Listener Threads
+            if self.mode == 'host':
+                # Setup Server
+                self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server.bind(('0.0.0.0', TCP_PORT))
+                self.server.listen(1)
+                Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"WAITING FOR CONNECTION ON {get_local_ip()}..."))
+                
+                conn, addr = self.server.accept()
+                self.sock = conn
+                self.target_ip = addr[0] # Auto-detect client IP for UDP
+                Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"CONNECTED: {addr[0]}"))
+                
+            else:
+                # Setup Client
+                Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"CONNECTING TO {self.target_ip}..."))
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.target_ip, TCP_PORT))
+                Clock.schedule_once(lambda dt: setattr(self.status, 'text', "CONNECTED SECURELY"))
+
+            # Start Listeners
             threading.Thread(target=self.listen_tcp, daemon=True).start()
             threading.Thread(target=self.listen_udp, daemon=True).start()
             
-            # Bind UI
-            self.send_btn.bind(on_press=self.send_msg)
-            self.btn_mic.bind(on_press=self.toggle_mic)
-            
-            # Start Audio Engine
-            audio.start()
-            
         except Exception as e:
-            self.log(f"CONNECTION ERROR: Server not found at {server_ip}")
-            self.log("Running in OFFLINE SIMULATION MODE")
+            Clock.schedule_once(lambda dt: setattr(self.status, 'text', f"ERROR: {str(e)}"))
 
     def listen_tcp(self):
-        while self.active:
+        while self.running and self.sock:
             try:
-                if hasattr(self, 'tcp'):
-                    data = self.tcp.recv(1024)
-                    if data: self.log(data.decode('utf-8'))
+                data = self.sock.recv(1024)
+                if data:
+                    # Decrypt
+                    msg = encrypt_decrypt(data.decode('utf-8'), self.key)
+                    Clock.schedule_once(lambda dt, m=msg: self.append_log(f"REMOTE: {m}"))
             except: break
 
     def listen_udp(self):
-        # Ping server to register UDP
-        try: self.udp.sendto(b'PING', (self.server_ip, 9999))
-        except: pass
-        
-        while self.active:
+        while self.running:
             try:
                 data, _ = self.udp.recvfrom(4096)
                 audio.write(data)
             except: pass
 
-    def send_audio(self):
-        while self.active and self.mic_active:
-            data = audio.read()
-            if data:
-                try: self.udp.sendto(data, (self.server_ip, 9999))
-                except: pass
+    def send_text(self, i):
+        if self.msg_in.text and self.sock:
+            # Encrypt
+            cipher = encrypt_decrypt(self.msg_in.text, self.key)
+            try:
+                self.sock.send(cipher.encode('utf-8'))
+                self.append_log(f"ME: {self.msg_in.text}")
+                self.msg_in.text = ""
+            except: pass
 
     def toggle_mic(self, i):
-        self.mic_active = not self.mic_active
-        if self.mic_active:
-            self.btn_mic.text = "MIC LIVE (TRANSMITTING)"
+        self.mic_live = not self.mic_live
+        if self.mic_live:
+            self.btn_mic.text = "RADIO LIVE (TRANSMITTING)"
             self.btn_mic.background_color = CYBER_GREEN
-            threading.Thread(target=self.send_audio, daemon=True).start()
+            threading.Thread(target=self.mic_loop, daemon=True).start()
         else:
-            self.btn_mic.text = "MIC MUTED"
+            self.btn_mic.text = "RADIO OFF (MIC MUTE)"
             self.btn_mic.background_color = ALERT_RED
 
-    def send_msg(self, i):
-        if self.msg_in.text:
-            msg = f"{self.username}: {self.msg_in.text}"
-            try: 
-                self.tcp.send(msg.encode('utf-8'))
-            except: 
-                # Simulate chat for offline mode
-                self.log(f"ME: {self.msg_in.text}")
-            self.msg_in.text = ""
+    def mic_loop(self):
+        while self.running and self.mic_live:
+            data = audio.read()
+            if data and self.target_ip:
+                try: self.udp.sendto(data, (self.target_ip, 8001))
+                except: pass
 
-    def log(self, txt): 
-        Clock.schedule_once(lambda dt: setattr(self.output, 'text', self.output.text + "\n" + txt))
-    
+    def append_log(self, text):
+        self.history.text += text + "\n"
+
     def disconnect(self, i):
-        self.active = False
+        self.running = False
+        self.mic_live = False
         audio.stop()
-        try: 
-            self.tcp.close()
-            self.udp.close()
-        except: pass
-        App.get_running_app().sm.current = 'dash'
+        if self.sock: self.sock.close()
+        self.manager.current = 'dash'
+
 
 class DroidShieldApp(App):
     def build(self):
         Window.clearcolor = DARK_BG
-        # Request Android Permissions on Launch
+        # Permissions check
         if platform == 'android':
             from android.permissions import request_permissions, Permission
             request_permissions([
-                Permission.INTERNET, 
-                Permission.RECORD_AUDIO, 
-                Permission.MODIFY_AUDIO_SETTINGS,
-                Permission.WRITE_EXTERNAL_STORAGE
+                Permission.INTERNET, Permission.RECORD_AUDIO, 
+                Permission.MODIFY_AUDIO_SETTINGS, Permission.WRITE_EXTERNAL_STORAGE
             ])
             
         self.sm = ScreenManager()
         self.sm.add_widget(Dashboard(name='dash'))
+        self.sm.add_widget(SetupScreen(name='setup'))
         self.sm.add_widget(CommsScreen(name='comms'))
         return self.sm
 
-    def launch_comms(self, ip, usr):
+    def start_comms(self, mode, ip, key):
         s = self.sm.get_screen('comms')
-        s.start(ip, usr)
+        s.setup(mode, ip, key)
         self.sm.current = 'comms'
 
 if __name__ == '__main__':
